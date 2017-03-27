@@ -59,6 +59,3 @@ def init_app():
             actions.append(tem)
 
         helpers.bulk(es, actions, stats_only=True)
-
-if __name__ == "__main__":
-    init_app()
