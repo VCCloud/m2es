@@ -95,3 +95,5 @@ ENV/
 .ropeproject
 *.conf
 */*.conf
+config.py
+*/config.py
