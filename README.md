@@ -21,9 +21,10 @@ vim config.py
 cd ..
 python2 run.py
 ```
+NOTE: if app in run.py = True it will sync all in database to elastic search by select * else will be only listening on binlog event
 
 #### Note
 
 ```
-Sync engine này chưa có check updated at, và chưa có filter các trường, chưa có limit update ( dễ bị sập nếu update trên 5000 bản ghi một lúc )
+Sync engine này chưa có check  chưa có filter các trường
 ```
