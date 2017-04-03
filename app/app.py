@@ -217,7 +217,6 @@ def init_app(first_run=False):
                         action["_source"] = row["after_values"]
                     elif isinstance(binlogevent, WriteRowsEvent):
                         action["_op_type"] = "index"
-                        print (row["values"])
                         action["_id"] = row["values"].pop(primary_key)
                         action["_source"] = row["values"]
                     else:
