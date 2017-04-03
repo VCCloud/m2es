@@ -15,11 +15,13 @@ import MySQLdb
 from gevent import monkey
 from gevent.pool import Pool
 import logging
+import time
 
 monkey.patch_socket()
 reload(sys)
 sys.setdefaultencoding('utf8')
 IGNORE_TABLES = config.IGNORE_TABLES
+ALLOW_TABLES = config.ALLOW_TABLES
 LARGEST_SIZE = 5000
 logging.basicConfig()
 log = logging.getLogger(__name__)
@@ -76,11 +78,9 @@ def binlog_streaming(DATABASE, SLAVE_SERVER,
 
 def init_worker(DATABASE=None, es=None, pool_size=3, number=LARGEST_SIZE,
                 table=None, key_name=None):
-    if pool_size <= 0:
-        pool_size = 3
 
     pool = Pool(pool_size)
-    query_limit = "select * from {table} LIMIT {offset}, {size} "
+    query_limit = "SELECT * FROM {table} LIMIT {offset}, {size} "
     paths = []
     for i in xrange(int(ceil(float(number) / LARGEST_SIZE))):
         paths.append(i * LARGEST_SIZE)
@@ -127,9 +127,8 @@ def init_app(first_run=False):
     db = init_db(DATABASE)
     cursor = db.cursor(MySQLdb.cursors.DictCursor)
     es = init_es(ELASTIC)
-    LARGEST_SIZE = 5000
     key_statement = "SHOW KEYS FROM {table} WHERE Key_name = 'PRIMARY'"
-    records = "select COUNT({key_name}) from {table}"
+    records = "SELECT COUNT({key_name}) FROM {table}"
 
     def query(statement):
         cursor.execute(statement)
@@ -141,16 +140,24 @@ def init_app(first_run=False):
     resume = True
     del data
 
-    cursor.execute("show tables")
+    cursor.execute("SHOW TABLES")
     tables = [value for data in cursor.fetchall()
               for value in data.values()]
 
     detail_tables = []
+    key_check = True
     for table in tables[:]:
-        if table in IGNORE_TABLES:
-            tables.remove(table)
+        if (ALLOW_TABLES):
+            if (table in ALLOW_TABLES and
+                table not in IGNORE_TABLES):
+                key_check = True
+            else:
+                key_check = False
 
-        else:
+        elif table in IGNORE_TABLES:
+            key_check = False
+
+        if key_check:
             key_name = query(key_statement.format(table=table))[0][
                 'Column_name']
             detail = {
@@ -159,9 +166,12 @@ def init_app(first_run=False):
             }
             print detail
             detail['total_records'] = query(records.format(
-                table=table, key_name=key_name))[0]['COUNT({key_name})'.format(
+                table=table,
+                key_name=key_name))[0]['COUNT({key_name})'.format(
                     key_name=key_name)]
             detail_tables.append(detail)
+
+        key_check = True
 
     if first_run:
         for detail in detail_tables:
@@ -239,7 +249,6 @@ def init_app(first_run=False):
         except Exception:
             log.info(last_log)
             log.info(last_pos)
-
 
         scheduler.enter(config.FREQUENCY, 1, sync_from_log, (DATABASE,
                                                              SLAVE_SERVER,
