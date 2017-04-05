@@ -1,6 +1,8 @@
 import sys
 from elasticsearch import Elasticsearch
 from elasticsearch import helpers
+from elasticsearch.exceptions import ConnectionError
+import urllib3
 from pymysqlreplication import BinLogStreamReader
 from pymysqlreplication.row_event import (
     DeleteRowsEvent,
@@ -15,7 +17,6 @@ import MySQLdb
 from gevent import monkey
 from gevent.pool import Pool
 import logging
-import time
 
 monkey.patch_socket()
 reload(sys)
@@ -28,33 +29,97 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
 
-def init_db(DATABASE):
-    db = MySQLdb.connect(host=DATABASE['host'],
-                         port=DATABASE['port'],
-                         user=DATABASE['username'],
-                         passwd=DATABASE['password'],
-                         db=DATABASE['db'])
-    return db
+class DB:
+
+    def __init__(self, DATABASE):
+        self.DATABASE = DATABASE
+
+    def init_db(self):
+        while True:
+            try:
+                self.db = MySQLdb.connect(host=self.DATABASE['host'],
+                                          port=self.DATABASE['port'],
+                                          user=self.DATABASE['username'],
+                                          passwd=self.DATABASE['password'],
+                                          db=self.DATABASE['db'])
+                break
+
+            except MySQLdb.OperationalError as e:
+                print e
+                print '============='
+                print 'Connection MySQL error'
+                print 'Trying reconnect in 10s'
+                for i in xrange(10):
+                    time.sleep(1)
+                    print "%ds" % i
+
+    def query(self, stmt):
+        try:
+            cursor = self.db.cursor(MySQLdb.cursors.DictCursor)
+            cursor.execute(stmt)
+
+        except (AttributeError, MySQLdb.OperationalError) as e:
+            print e
+            self.init_db()
+            cursor = self.db.cursor(MySQLdb.cursors.DictCursor)
+            cursor.execute(stmt)
+
+        return cursor
+
+    def close(self):
+        self.db.close()
 
 
-def init_es(ELASTIC):
-    if ELASTIC.get("username", None):
-        ELASTIC_URI = ("{protocol}://{username}:{passwd}@{host}:{port}".format(
-            protocol=ELASTIC['protocol'],
-            username=ELASTIC['username'],
-            passwd=ELASTIC['password'],
-            host=ELASTIC['host'],
-            port=ELASTIC['port']
-        ))
+class ES:
 
-    else:
-        ELASTIC_URI = ("{protocol}://{host}:{port}".format(
-            protocol=ELASTIC['protocol'],
-            host=ELASTIC['host'],
-            port=ELASTIC['port']
-        ))
+    def __init__(self, ELASTIC):
+        self.ELASTIC = ELASTIC
+        if self.ELASTIC.get("username", None):
+            self.ELASTIC_URI = (
+                "{protocol}://{username}:{passwd}@{host}:{port}".format(
+                    protocol=self.ELASTIC['protocol'],
+                    username=self.ELASTIC['username'],
+                    passwd=self.ELASTIC['password'],
+                    host=self.ELASTIC['host'],
+                    port=self.ELASTIC['port']
+                ))
 
-    return Elasticsearch(ELASTIC_URI)
+        else:
+            self.ELASTIC_URI = ("{protocol}://{host}:{port}".format(
+                protocol=self.ELASTIC['protocol'],
+                host=self.ELASTIC['host'],
+                port=self.ELASTIC['port']
+            ))
+
+    def init_es(self):
+
+        while True:
+            try:
+
+                self.es = Elasticsearch(self.ELASTIC_URI)
+                if self.es.ping() is False:
+                    raise ConnectionError
+                break
+
+            except (ConnectionError,
+                    urllib3.exceptions.ConnectTimeoutError):
+                print '============='
+                print 'Connection Elastic error'
+                print 'Trying reconnect in 10s'
+                for i in xrange(10):
+                    time.sleep(1)
+                    print "%ds" % i
+
+    def bulk(self, actions):
+        try:
+            return helpers.bulk(self.es, actions, stats_only=True,
+                                raise_on_error=True)
+
+        except (ConnectionError,
+                AttributeError) as e:
+            self.init_es()
+            return helpers.bulk(self.es, actions, stats_only=True,
+                                raise_on_error=True)
 
 
 def binlog_streaming(DATABASE, SLAVE_SERVER,
@@ -91,9 +156,8 @@ def init_worker(DATABASE=None, es=None, pool_size=3, number=LARGEST_SIZE,
                                               stop=start + LARGEST_SIZE)
         statement = query_limit.format(table=table, offset=start,
                                        size=LARGEST_SIZE)
-        db = init_db(DATABASE)
-        cursor = db.cursor(MySQLdb.cursors.DictCursor)
-        cursor.execute(statement)
+        db = DB(DATABASE)
+        cursor = db.query(statement)
         datas = cursor.fetchall()
         action = {
             "_op_type": 'index',
@@ -111,7 +175,7 @@ def init_worker(DATABASE=None, es=None, pool_size=3, number=LARGEST_SIZE,
             actions.append(tem)
             log.info(tem)
 
-        result = helpers.bulk(es, actions, stats_only=True)
+        result = es.bulk(actions)
         cursor.close()
         db.close()
         print "Result", result
@@ -124,14 +188,13 @@ def init_app(first_run=False):
     DATABASE = config.MYSQL_URI
     ELASTIC = config.ELASTIC
     SLAVE_SERVER = config.SLAVE_SERVER
-    db = init_db(DATABASE)
-    cursor = db.cursor(MySQLdb.cursors.DictCursor)
-    es = init_es(ELASTIC)
+    db = DB(DATABASE)
+    es = ES(ELASTIC)
     key_statement = "SHOW KEYS FROM {table} WHERE Key_name = 'PRIMARY'"
     records = "SELECT COUNT({key_name}) FROM {table}"
 
     def query(statement):
-        cursor.execute(statement)
+        cursor = db.query(statement)
         return cursor.fetchall()
 
     data = query("SHOW MASTER STATUS")[0]
@@ -140,7 +203,7 @@ def init_app(first_run=False):
     resume = True
     del data
 
-    cursor.execute("SHOW TABLES")
+    cursor = db.query("SHOW TABLES")
     tables = [value for data in cursor.fetchall()
               for value in data.values()]
 
@@ -149,7 +212,7 @@ def init_app(first_run=False):
     for table in tables[:]:
         if (ALLOW_TABLES):
             if (table in ALLOW_TABLES and
-                table not in IGNORE_TABLES):
+                    table not in IGNORE_TABLES):
                 key_check = True
             else:
                 key_check = False
@@ -230,16 +293,13 @@ def init_app(first_run=False):
                 parts = int(ceil(float(len(actions) / LARGEST_SIZE)))
 
                 for part in range(parts - 1):
-                    print helpers.bulk(
-                        es,
-                        actions[part * LARGEST_SIZE:
-                                (part + 1) * LARGEST_SIZE],
-                        stats_only=True)
+                    print es.bulk(actions[part * LARGEST_SIZE:
+                                          (part + 1) * LARGEST_SIZE])
             else:
                 log.info(actions)
-                print helpers.bulk(es, actions, stats_only=True)
+                print es.bulk(actions)
 
-            cursor.execute("SHOW MASTER STATUS")
+            cursor = db.query("SHOW MASTER STATUS")
             data = cursor.fetchall()[0]
             last_log = data['File']
             last_pos = data['Position']
