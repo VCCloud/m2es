@@ -49,7 +49,7 @@ class DB:
                 print '============='
                 print 'Connection MySQL error'
                 print 'Trying reconnect in 10s'
-                for i in xrange(10):
+                for i in xrange(10, 0, -1):
                     time.sleep(1)
                     print "%ds" % i
 
@@ -106,7 +106,7 @@ class ES:
                 print '============='
                 print 'Connection Elastic error'
                 print 'Trying reconnect in 10s'
-                for i in xrange(10):
+                for i in xrange(10, 0, -1):
                     time.sleep(1)
                     print "%ds" % i
 
