@@ -14,13 +14,16 @@ import time
 from math import ceil
 import config
 import MySQLdb
+import pymysql
 from gevent import monkey
 from gevent.pool import Pool
 import logging
 
-monkey.patch_socket()
 reload(sys)
 sys.setdefaultencoding('utf8')
+
+monkey.patch_socket()
+
 IGNORE_TABLES = config.IGNORE_TABLES
 ALLOW_TABLES = config.ALLOW_TABLES
 LARGEST_SIZE = 5000
@@ -41,7 +44,8 @@ class DB:
                                           port=self.DATABASE['port'],
                                           user=self.DATABASE['username'],
                                           passwd=self.DATABASE['password'],
-                                          db=self.DATABASE['db'])
+                                          db=self.DATABASE['db'],
+                                          charset='utf8')
                 break
 
             except MySQLdb.OperationalError as e:
@@ -305,9 +309,10 @@ def init_app(first_run=False):
             last_pos = data['Position']
             log.info(last_log)
             log.info(last_pos)
-        except Exception:
-            log.info(last_log)
-            log.info(last_pos)
+        except pymysql.err.OperationalError as e:
+            print "Connection ERROR:", e
+            log.info(("LAST_LOG:", last_log))
+            log.info(("LAST_POS:", last_pos))
 
         scheduler.enter(config.FREQUENCY, 1, sync_from_log, (DATABASE,
                                                              SLAVE_SERVER,

@@ -1,5 +1,7 @@
 appdirs==1.4.3
 elasticsearch==5.2.0
+gevent==1.2.1
+greenlet==0.4.12
 MySQL-python==1.2.5
 mysql-replication==0.11
 packaging==16.8
