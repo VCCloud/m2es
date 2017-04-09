@@ -1,4 +1,5 @@
 import sys
+import elasticsearch
 from elasticsearch import Elasticsearch
 from elasticsearch import helpers
 from elasticsearch.exceptions import ConnectionError
@@ -36,6 +37,7 @@ class DB:
 
     def __init__(self, DATABASE):
         self.DATABASE = DATABASE
+        self.first = True
 
     def init_db(self):
         while True:
@@ -49,21 +51,25 @@ class DB:
                 break
 
             except MySQLdb.OperationalError as e:
-                print e
-                print '============='
-                print 'Connection MySQL error'
-                print 'Trying reconnect in 10s'
+                log.error(e)
+                log.info('=============')
+                log.info('Connection MySQL error')
+                log.info('Trying reconnect in 10s')
                 for i in xrange(10, 0, -1):
                     time.sleep(1)
-                    print "%ds" % i
+                    log.info("%ds", i)
 
     def query(self, stmt):
         try:
+            if self.first:
+                self.init_db()
+                self.first = False
+
             cursor = self.db.cursor(MySQLdb.cursors.DictCursor)
             cursor.execute(stmt)
 
         except (AttributeError, MySQLdb.OperationalError) as e:
-            print e
+            log.error(e)
             self.init_db()
             cursor = self.db.cursor(MySQLdb.cursors.DictCursor)
             cursor.execute(stmt)
@@ -77,6 +83,7 @@ class DB:
 class ES:
 
     def __init__(self, ELASTIC):
+        self.first = True
         self.ELASTIC = ELASTIC
         if self.ELASTIC.get("username", None):
             self.ELASTIC_URI = (
@@ -99,7 +106,6 @@ class ES:
 
         while True:
             try:
-
                 self.es = Elasticsearch(self.ELASTIC_URI)
                 if self.es.ping() is False:
                     raise ConnectionError
@@ -107,15 +113,19 @@ class ES:
 
             except (ConnectionError,
                     urllib3.exceptions.ConnectTimeoutError):
-                print '============='
-                print 'Connection Elastic error'
-                print 'Trying reconnect in 10s'
+                log.error('=============')
+                log.error('Connection Elastic error')
+                log.info('Trying reconnect in 10s')
                 for i in xrange(10, 0, -1):
                     time.sleep(1)
-                    print "%ds" % i
+                    log.info("%ds", i)
 
     def bulk(self, actions):
         try:
+            if self.first:
+                self.init_es()
+                self.first = False
+
             return helpers.bulk(self.es, actions, stats_only=True,
                                 raise_on_error=True)
 
@@ -156,8 +166,7 @@ def init_worker(DATABASE=None, es=None, pool_size=3, number=LARGEST_SIZE,
 
     def worker(start):
         actions = list()
-        print "FROM {start} TO {stop}".format(start=start,
-                                              stop=start + LARGEST_SIZE)
+        log.info("FROM %s TO %s", start, start + LARGEST_SIZE)
         statement = query_limit.format(table=table, offset=start,
                                        size=LARGEST_SIZE)
         db = DB(DATABASE)
@@ -170,19 +179,37 @@ def init_worker(DATABASE=None, es=None, pool_size=3, number=LARGEST_SIZE,
         }
 
         for data in datas:
-            print "------------------"
-            print data
-            print table
+            log.info("------------------")
+            log.info(data)
+            log.info(table)
             tem = dict(action)
             tem["_id"] = data.pop(key_name)
             tem["_source"] = data
             actions.append(tem)
             log.info(tem)
 
-        result = es.bulk(actions)
+        while True:
+            try:
+                success, error = es.bulk(actions)
+                if error:
+                    log.error('Error %s at path %s', error, start)
+                    log.info('Try resend at path %s in 10s', start)
+                    for i in xrange(10, 0, -1):
+                        time.sleep(1)
+                        log.info("%ds", i)
+                else:
+                    break
+
+            except elasticsearch.BulkIndexError as e:
+                log.error(e)
+                log.info('Try resend at path %s in 10s', start)
+                for i in xrange(10, 0, -1):
+                    time.sleep(1)
+                    log.info("%ds", i)
+
         cursor.close()
         db.close()
-        print "Result", result
+        log.info("Result %s at path %s", success, start)
 
     pool.map(worker, paths)
     pool.join()
@@ -231,7 +258,7 @@ def init_app(first_run=False):
                 'table_name': table,
                 'primary_key': key_name
             }
-            print detail
+            log.info(detail)
             detail['total_records'] = query(records.format(
                 table=table,
                 key_name=key_name))[0]['COUNT({key_name})'.format(
@@ -253,6 +280,7 @@ def init_app(first_run=False):
 
     scheduler = sched.scheduler(time.time, time.sleep)
 
+    log.info('START')
     log.info(last_log)
     log.info(last_pos)
 
@@ -271,7 +299,7 @@ def init_app(first_run=False):
                         "_index": DATABASE['db'],
                         "_type": binlogevent.table
                     }
-                    print '-----------------------------'
+                    log.info('-----------------------------')
                     for detail in detail_tables:
                         if detail['table_name'] == binlogevent.table:
                             primary_key = detail['primary_key']
@@ -297,22 +325,36 @@ def init_app(first_run=False):
                 parts = int(ceil(float(len(actions) / LARGEST_SIZE)))
 
                 for part in range(parts - 1):
-                    print es.bulk(actions[part * LARGEST_SIZE:
-                                          (part + 1) * LARGEST_SIZE])
+                    log.info(es.bulk(actions[part * LARGEST_SIZE:
+                                             (part + 1) * LARGEST_SIZE]))
             else:
                 log.info(actions)
-                print es.bulk(actions)
+                success, error = es.bulk(actions)
+                if error:
+                    raise Warning(error)
 
             cursor = db.query("SHOW MASTER STATUS")
             data = cursor.fetchall()[0]
             last_log = data['File']
             last_pos = data['Position']
-            log.info(last_log)
-            log.info(last_pos)
+            log.info('RENEW LOG')
+            log.info('last log: %s', last_log)
+            log.info('last pos: %s', last_pos)
+
         except pymysql.err.OperationalError as e:
-            print "Connection ERROR:", e
-            log.info(("LAST_LOG:", last_log))
-            log.info(("LAST_POS:", last_pos))
+            log.error("Connection ERROR: %s", e)
+            log.info("LAST_LOG: %s", last_log)
+            log.info("LAST_POS: %s", last_pos)
+
+        except elasticsearch.BulkIndexError as e:
+            log.error("Elasticsearch error: %s", e)
+            log.info("LAST_LOG: %s", last_log)
+            log.info("LAST_POS: %s", last_pos)
+
+        except Warning as e:
+            log.error("Elasticsearch error: %s", e)
+            log.info("LAST_LOG: %s", last_log)
+            log.info("LAST_POS: %s", last_pos)
 
         scheduler.enter(config.FREQUENCY, 1, sync_from_log, (DATABASE,
                                                              SLAVE_SERVER,
