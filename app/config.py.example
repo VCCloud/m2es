@@ -1,7 +1,7 @@
 ELASTIC = {
     "username": "elastic",
     "password": "changeme",
-    "host": "elastic.quang-elastic.lamdt.paas.vn",
+    "host": "localhost",
     "port": 9200,
     "protocol": "http"
 }
