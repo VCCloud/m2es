@@ -1,0 +1,24 @@
+ELASTIC = {
+    "username": "elastic",
+    "password": "changeme",
+    "host": "localhost",
+    "port": 9200,
+    "protocol": "http"
+}
+
+MYSQL_DBs = []
+MYSQL_URI = {
+    "username": "test123",
+    "password": "test1234@123A",
+    "host": "localhost",
+    "port": 3306,
+    "db": "crm"
+}
+
+SLAVE_SERVER = {
+    "id": 1
+}
+
+FREQUENCY = 60
+IGNORE_TABLES = ['alembic_version', 'migrate_version']
+ALLOW_TABLES = []
