@@ -1,3 +1,8 @@
+import logging
+
+logging.basicConfig()
+LOG = logging.getLogger(__name__)
+LOG.setLevel(logging.DEBUG)
 ELASTIC = {
     "username": "elastic",
     "password": "changeme",
@@ -11,7 +16,7 @@ MYSQL_URI = {
     "username": "test123",
     "password": "test1234@123A",
     "host": "localhost",
-    "port": 3306,
+    "port": 3307,
     "db": "crm"
 }
 

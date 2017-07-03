@@ -2,6 +2,7 @@ import time
 import config
 import MySQLdb
 
+
 class DB:
 
     def __init__(self, DATABASE):
@@ -17,6 +18,7 @@ class DB:
                                           passwd=self.DATABASE['password'],
                                           db=self.DATABASE['db'],
                                           charset='utf8')
+                self.db.autocommit(True)
                 break
 
             except MySQLdb.OperationalError as e:
@@ -36,14 +38,18 @@ class DB:
 
             cursor = self.db.cursor(MySQLdb.cursors.DictCursor)
             cursor.execute(stmt)
+            data = cursor.fetchall()
+            cursor.close()
+            return data
 
         except (AttributeError, MySQLdb.OperationalError) as e:
             config.LOG.error(e)
             self.init_db()
             cursor = self.db.cursor(MySQLdb.cursors.DictCursor)
             cursor.execute(stmt)
-
-        return cursor
+            data = cursor.fetchall()
+            cursor.close()
+            return data
 
     def close(self):
         self.db.close()

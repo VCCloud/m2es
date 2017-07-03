@@ -65,6 +65,7 @@ class ES:
 
         except (ConnectionError,
                 AttributeError) as e:
+            config.LOG.info('ERROR %s %s', e, type(e))
             self.init_es()
             return helpers.bulk(self.es, actions, stats_only=True,
                                 raise_on_error=True)
