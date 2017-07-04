@@ -1,4 +1,12 @@
-from app.app import init_app as app
+from app.app import SyncApp
+
+
+def main():
+
+    app = SyncApp(first_run=True)
+    app.run()
+
+
 
 if __name__ == "__main__":
-    app(True)
+    main()

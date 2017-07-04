@@ -27,3 +27,4 @@ SLAVE_SERVER = {
 FREQUENCY = 60
 IGNORE_TABLES = ['alembic_version', 'migrate_version']
 ALLOW_TABLES = []
+LARGEST_SIZE = 5000

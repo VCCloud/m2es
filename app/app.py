@@ -12,8 +12,7 @@ import config
 import config.LOG as log
 import pymysql
 from gevent import monkey
-from gevent.pool import Pool
-from app.modules import (DB, ES, binlog_streaming)
+from app.modules import (DB, ES, binlog_streaming, WorkerSync)
 
 reload(sys)
 sys.setdefaultencoding('utf8')
@@ -22,162 +21,144 @@ monkey.patch_socket()
 
 IGNORE_TABLES = config.IGNORE_TABLES
 ALLOW_TABLES = config.ALLOW_TABLES
-LARGEST_SIZE = 5000
+LARGEST_SIZE = config.LARGEST_SIZE
 
 
-def init_worker(DATABASE=None, es=None, pool_size=3, number=LARGEST_SIZE,
-                table=None, key_name=None):
+class SyncApp():
 
-    pool = Pool(pool_size)
-    query_limit = "SELECT * FROM {table} LIMIT {offset}, {size} "
-    paths = []
-    for i in xrange(int(ceil(float(number) / LARGEST_SIZE))):
-        paths.append(i * LARGEST_SIZE)
+    def __init__(self, first_run=False,
+                 setup_query=None,
+                 after_query=None,
+                 before_sync_while_logging=None):
+        self.before_sync_while_logging = before_sync_while_logging
+        self.setup_query = setup_query
+        self.after_query = after_query
+        self.first_run = first_run
+        self.DATABASE = config.MYSQL_URI
+        self.ELASTIC = config.ELASTIC
+        self.SLAVE_SERVER = config.SLAVE_SERVER
+        self.db = DB(self.DATABASE)
+        self.es = ES(self.ELASTIC)
+        self.last_log, self.last_pos = self.get_last_log()
+        self.tables = self.get_tables()
+        self.resume = True
+        self.detail_tables = self.get_detail_tables()
 
-    def worker(start):
-        actions = list()
-        log.info("FROM %s TO %s", start, start + LARGEST_SIZE)
-        statement = query_limit.format(table=table, offset=start,
-                                       size=LARGEST_SIZE)
-        db = DB(DATABASE)
-        datas = db.query(statement)
-        action = {
-            "_op_type": 'index',
-            "_index": DATABASE['db'],
-            "_type": table
-        }
+        if self.first_run:
+            self.first_sync()
+        self.scheduler = sched.scheduler(time.time, time.sleep)
+        log.info('START')
+        log.info(self.last_log)
+        log.info(self.last_pos)
+        self.scheduler.enter(config.FREQUENCY, 1, self.sync_from_log, ())
 
-        for data in datas:
-            log.info("------------------")
-            log.info(data)
-            log.info(table)
-            tem = dict(action)
-            tem["_id"] = data.pop(key_name)
-            tem["_source"] = data
-            actions.append(tem)
-            log.info(tem)
-
-        while True:
-            try:
-                success, error = es.bulk(actions)
-                if error:
-                    log.error('Error %s at path %s', error, start)
-                    log.info('Try resend at path %s in 10s', start)
-                    for i in xrange(10, 0, -1):
-                        time.sleep(1)
-                        log.info("%ds", i)
-                else:
-                    break
-
-            except elasticsearch.BulkIndexError as e:
-                log.error(e)
-                log.info('Try resend at path %s in 10s', start)
-                for i in xrange(10, 0, -1):
-                    time.sleep(1)
-                    log.info("%ds", i)
-
-        log.info("Result %s at path %s", success, start)
-
-    pool.map(worker, paths)
-    pool.join()
+    def run(self):
+        self.scheduler.run()
 
 
-def init_app(first_run=False):
-    DATABASE = config.MYSQL_URI
-    ELASTIC = config.ELASTIC
-    SLAVE_SERVER = config.SLAVE_SERVER
-    db = DB(DATABASE)
-    es = ES(ELASTIC)
-    key_statement = "SHOW KEYS FROM {table} WHERE Key_name = 'PRIMARY'"
-    records = "SELECT COUNT({key_name}) FROM {table}"
+    def get_detail_tables(self):
+        tables = self.get_tables()
+        detail_tables = []
+        for table in tables[:]:
+            if self.check_permission_table(table):
+                key_name = self.get_master_key(table)
+                detail = {
+                    'table_name': table,
+                    'primary_key': key_name
+                }
+                log.info(detail)
+                detail['total_records'] = self.get_table_size(table, key_name)
+                detail_tables.append(detail)
 
-    data = db.query("SHOW MASTER STATUS")[0]
-    last_log = data['File']
-    last_pos = data['Position']
-    resume = True
-    del data
+        return detail_tables
 
-    datas = db.query("SHOW TABLES")
-    tables = [value for data in datas
-              for value in data.values()]
-
-    detail_tables = []
-    key_check = True
-    for table in tables[:]:
-        if (ALLOW_TABLES):
-            if (table in ALLOW_TABLES and
-                    table not in IGNORE_TABLES):
-                key_check = True
-            else:
-                key_check = False
-
-        elif table in IGNORE_TABLES:
-            key_check = False
-
-        if key_check:
-            key_name = db.query(key_statement.format(table=table))[0][
-                'Column_name']
-            detail = {
-                'table_name': table,
-                'primary_key': key_name
-            }
-            log.info(detail)
-            detail['total_records'] = db.query(
-                records.format(table=table, key_name=key_name))[0][
-                'COUNT({key_name})'.format(key_name=key_name)]
-            detail_tables.append(detail)
-
-        key_check = True
-
-    if first_run:
-        for detail in detail_tables:
-            init_worker(
-                DATABASE=DATABASE,
-                es=es,
+    def first_sync(self):
+        for detail in self.detail_tables:
+            WorkerSync(
+                DATABASE=self.DATABASE,
+                es=self.es,
                 number=detail['total_records'],
                 table=detail['table_name'],
-                key_name=detail['primary_key'])
+                key_name=detail['primary_key'],
+                setup_query=self.setup_query.get(detail['table_name'], None),
+                after_query=self.after_query.get(detail['table_name'], None)
+            ).run()
+        self.first_run = False
 
-        first_run = False
+    def get_table_size(self, table, key_name):
+        records = "SELECT COUNT({key_name}) FROM {table}"
+        return self.db.query(records.format(
+            table=table, key_name=key_name))[0][
+            'COUNT({key_name})'.format(key_name=key_name)]
 
-    scheduler = sched.scheduler(time.time, time.sleep)
+    def get_master_key(self, table):
+        key_statement = "SHOW KEYS FROM {table} WHERE Key_name = 'PRIMARY'"
+        return self.db.query(key_statement.format(table=table))[
+            0]['Column_name']
 
-    log.info('START')
-    log.info(last_log)
-    log.info(last_pos)
+    def get_tables(self):
+        datas = self.db.query("SHOW TABLES")
+        return [value for data in datas
+                for value in data.values()]
 
-    def sync_from_log(DATABASE, SLAVE_SERVER, resume, last_log, last_pos):
+    def check_permission_table(self, table):
+        if (ALLOW_TABLES):
+            return (table in ALLOW_TABLES and
+                    table not in IGNORE_TABLES)
+
+        return table not in IGNORE_TABLES
+
+    def get_last_log(self):
+        data = self.db.query("SHOW MASTER STATUS")[0]
+        return data['File'], data['Position']
+
+    def sync_from_log(self):
         actions = list()
         try:
-            stream = binlog_streaming(DATABASE, SLAVE_SERVER, resume=resume,
-                                      log_file=last_log, log_pos=last_pos)
+            stream = binlog_streaming(self.DATABASE, self.SLAVE_SERVER,
+                                      resume=self.resume,
+                                      log_file=self.last_log,
+                                      log_pos=self.last_pos)
 
             for binlogevent in stream:
-                if (binlogevent.table in IGNORE_TABLES):
+                if not self.check_permission_table(binlogevent.table):
                     continue
 
                 for row in binlogevent.rows:
                     action = {
-                        "_index": DATABASE['db'],
-                        "_type": binlogevent.table
+                        "_index": self.DATABASE['db'].lower(),
+                        "_type": binlogevent.table.lower()
                     }
                     log.info('-----------------------------')
-                    for detail in detail_tables:
+                    for detail in self.detail_tables:
                         if detail['table_name'] == binlogevent.table:
+                            before_sync = self.before_sync_while_logging.get(
+                                binlogevent.table,
+                                None)
                             primary_key = detail['primary_key']
+                            break
+
+                    try:
+                        data = row["values"]
+                    except BaseException:
+                        data = row["after_values"]
+
+
+                    if before_sync:
+                        primary_key, data = before_sync(
+                            primary_key=primary_key,
+                            data=data)
                     if isinstance(binlogevent, DeleteRowsEvent):
                         action["_op_type"] = "delete"
-                        action["_id"] = row["values"].pop(primary_key)
-                    elif isinstance(binlogevent, UpdateRowsEvent):
+                        action["_id"] = data.pop(primary_key)
+                    elif (isinstance(binlogevent, UpdateRowsEvent) or
+                            isinstance(binlogevent, WriteRowsEvent)):
                         action["_op_type"] = "index"
-                        action["_id"] = row["after_values"].pop(primary_key)
-                        action["_source"] = row["after_values"]
-                    elif isinstance(binlogevent, WriteRowsEvent):
-                        action["_op_type"] = "index"
-                        action["_id"] = row["values"].pop(primary_key)
-                        action["_source"] = row["values"]
+                        action["_id"] = data.pop(primary_key)
+                        action["_source"] = data
                     else:
                         continue
+
                     actions.append(action)
 
             stream.close()
@@ -187,42 +168,32 @@ def init_app(first_run=False):
                 parts = int(ceil(float(len(actions) / LARGEST_SIZE)))
 
                 for part in range(parts - 1):
-                    log.info(es.bulk(actions[part * LARGEST_SIZE:
-                                             (part + 1) * LARGEST_SIZE]))
+                    log.info(self.es.bulk(actions[part * LARGEST_SIZE:
+                                                  (part + 1) * LARGEST_SIZE]))
             else:
                 log.info(actions)
-                success, error = es.bulk(actions)
+                success, error = self.es.bulk(actions)
                 if error:
                     raise Warning(error)
 
-            data = db.query("SHOW MASTER STATUS")[0]
-            last_log = data['File']
-            last_pos = data['Position']
+            self.last_log, self.last_pos = self.get_last_log()
             log.info('RENEW LOG')
-            log.info('last log: %s', last_log)
-            log.info('last pos: %s', last_pos)
+            log.info('last log: %s', self.last_log)
+            log.info('last pos: %s', self.last_pos)
 
         except pymysql.err.OperationalError as e:
             log.error("Connection ERROR: %s", e)
-            log.info("LAST_LOG: %s", last_log)
-            log.info("LAST_POS: %s", last_pos)
+            log.info("LAST_LOG: %s", self.last_log)
+            log.info("LAST_POS: %s", self.last_pos)
 
         except elasticsearch.BulkIndexError as e:
             log.error("Elasticsearch error: %s", e)
-            log.info("LAST_LOG: %s", last_log)
-            log.info("LAST_POS: %s", last_pos)
+            log.info("LAST_LOG: %s", self.last_log)
+            log.info("LAST_POS: %s", self.last_pos)
 
         except Warning as e:
             log.error("Elasticsearch error: %s", e)
-            log.info("LAST_LOG: %s", last_log)
-            log.info("LAST_POS: %s", last_pos)
+            log.info("LAST_LOG: %s", self.last_log)
+            log.info("LAST_POS: %s", self.last_pos)
 
-        scheduler.enter(config.FREQUENCY, 1, sync_from_log, (DATABASE,
-                                                             SLAVE_SERVER,
-                                                             resume,
-                                                             last_log,
-                                                             last_pos))
-
-    scheduler.enter(1, 1, sync_from_log, (DATABASE, SLAVE_SERVER, resume,
-                                          last_log, last_pos))
-    scheduler.run()
+        self.scheduler.enter(config.FREQUENCY, 1, self.sync_from_log, ())
