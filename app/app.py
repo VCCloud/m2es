@@ -186,7 +186,7 @@ class SyncApp():
             log.info("LAST_LOG: %s", self.last_log)
             log.info("LAST_POS: %s", self.last_pos)
 
-        except elasticsearch.BulkIndexError as e:
+        except elasticsearch.ElasticsearchException as e:
             log.error("Elasticsearch error: %s", e)
             log.info("LAST_LOG: %s", self.last_log)
             log.info("LAST_POS: %s", self.last_pos)
