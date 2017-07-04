@@ -36,9 +36,9 @@ class WorkerSync(object):
         self.__pool_size = pool_size
         self.__number = number
         self.__table = table
-        self.__pool = Pool(self.pool_size)
+        self.__pool = Pool(self.__pool_size)
         self.__paths = [i * LARGEST_SIZE for i in xrange(
-            int(ceil(float(self.number) / LARGEST_SIZE)))]
+            int(ceil(float(self.__number) / LARGEST_SIZE)))]
 
     def __worker(self, start):
         actions = list()
@@ -68,7 +68,7 @@ class WorkerSync(object):
 
         while True:
             try:
-                success, error = self.es.bulk(actions)
+                success, error = self.__es.bulk(actions)
                 if error:
                     log.error('Error %s at path %s', error, start)
                     log.info('Try resend at path %s in 10s', start)
